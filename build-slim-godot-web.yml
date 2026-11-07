@@ -1,0 +1,80 @@
+name: Build slim Godot Web template (Island Fight Race)
+
+on:
+  workflow_dispatch:
+    inputs:
+      godot_ref:
+        description: "Godot tag (same as your editor)"
+        default: "4.7.2-stable"
+      emscripten:
+        description: "Emscripten version"
+        default: "4.0.11"
+      baseline_wasm_bytes:
+        description: "Your old godot.wasm size"
+        default: "19287799"
+      keep_mbedtls:
+        description: "Keep mbedTLS (true = no game script change needed)"
+        type: boolean
+        default: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: kit }
+
+      - run: git clone --depth 1 --branch "${{ inputs.godot_ref }}" https://github.com/godotengine/godot.git godot
+
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ inputs.emscripten }}
+          actions-cache-folder: emsdk-cache
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install scons
+
+      - name: Build
+        working-directory: godot
+        run: |
+          set -euxo pipefail
+          mkdir -p profiles && cp ../kit/island_fight_race.build profiles/
+          MODS=""
+          for m in csg gridmap enet webrtc upnp multiplayer camera mobile_vr openxr webxr theora basis_universal gltf fbx noise jsonrpc tga bmp dds ktx hdr tinyexr msdfgen godot_physics_2d godot_physics_3d navigation_2d navigation_3d; do
+            MODS="$MODS module_${m}_enabled=no"
+          done
+          if [ "${{ inputs.keep_mbedtls }}" != "true" ]; then MODS="$MODS module_mbedtls_enabled=no"; fi
+          scons -j"$(nproc)" platform=web target=template_release threads=no dlink_enabled=no \
+            javascript_eval=yes build_name=custom_build optimize=size_extra lto=full production=yes \
+            debug_symbols=no deprecated=no opengl3=yes vulkan=no d3d12=no metal=no openxr=no use_volk=no \
+            minizip=no brotli=no graphite=no accesskit=no disable_xr=yes \
+            build_profile=profiles/island_fight_race.build $MODS 2>&1 | tee ../build.log
+          ls -l bin
+          test -f bin/godot.web.template_release.wasm32.nothreads.zip
+
+      - name: Sizes (report only, never fails)
+        run: |
+          mkdir -p out && cp godot/bin/godot.web.template_release.wasm32.nothreads.zip out/web_nothreads_release.zip
+          cd out && mkdir t && unzip -q web_nothreads_release.zip -d t
+          W=$(stat -c%s t/godot.wasm); B=${{ inputs.baseline_wasm_bytes }}
+          echo "new wasm: $W bytes | old: $B | difference: $((W-B)) (negative = smaller)" | tee sizes.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web_nothreads_release
+          path: |
+            out/web_nothreads_release.zip
+            out/sizes.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
